@@ -5,8 +5,8 @@
   "identifier": "com.ensue.alertboard",
   "build": {
     "frontendDist": "../dist",
-    "devUrl": "http://localhost:8088",
-    "beforeDevCommand": "npm run web",
+    "devUrl": "http://localhost:8081",
+    "beforeDevCommand": "npm run web:desktop",
     "beforeBuildCommand": "npm run export:web"
   },
   "app": {
