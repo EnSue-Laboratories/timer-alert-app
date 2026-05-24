@@ -1,4 +1,13 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { isTauri } from '@tauri-apps/api/core';
+import { getCurrentWindow } from '@tauri-apps/api/window';
+import {
+  cancel as cancelDesktopNotifications,
+  isPermissionGranted as isDesktopPermissionGranted,
+  requestPermission as requestDesktopPermission,
+  Schedule,
+  sendNotification as sendDesktopNotification,
+} from '@tauri-apps/plugin-notification';
 import * as Notifications from 'expo-notifications';
 import { StatusBar } from 'expo-status-bar';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -41,6 +50,7 @@ type AlertRule = {
   offsetMs: number;
   fired: boolean;
   notificationId?: string;
+  desktopNotificationId?: number;
 };
 
 type TimerItem = {
@@ -78,6 +88,25 @@ const presets = [
 ];
 
 const uid = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+
+const isDesktopRuntime = () => {
+  try {
+    return isTauri();
+  } catch {
+    return false;
+  }
+};
+
+const desktopNotificationId = (timerId: string, alertId: string) => {
+  const source = `${timerId}:${alertId}`;
+  let hash = 0;
+
+  for (let index = 0; index < source.length; index += 1) {
+    hash = (hash * 31 + source.charCodeAt(index)) | 0;
+  }
+
+  return Math.abs(hash) || 1;
+};
 
 const clampNumber = (value: string, fallback: number) => {
   const numeric = Number(value.replace(/[^\d.]/g, ''));
@@ -211,6 +240,14 @@ export default function App() {
   }, [persist]);
 
   const requestNotificationAccess = useCallback(async () => {
+    if (isDesktopRuntime()) {
+      const granted = await isDesktopPermissionGranted();
+      const finalStatus = granted ? 'granted' : await requestDesktopPermission();
+      const allowed = finalStatus === 'granted';
+      setPermissionStatus(allowed ? 'granted' : 'denied');
+      return allowed;
+    }
+
     const existing = await Notifications.getPermissionsAsync();
     const finalStatus = existing.granted ? existing : await Notifications.requestPermissionsAsync();
     setPermissionStatus(finalStatus.granted ? 'granted' : 'denied');
@@ -229,6 +266,18 @@ export default function App() {
   }, []);
 
   const cancelTimerNotifications = useCallback(async (timer: TimerItem) => {
+    if (isDesktopRuntime()) {
+      const desktopIds = timer.alerts
+        .map((rule) => rule.desktopNotificationId)
+        .filter((notificationId): notificationId is number => typeof notificationId === 'number');
+
+      if (desktopIds.length > 0) {
+        await cancelDesktopNotifications(desktopIds).catch(() => undefined);
+      }
+
+      return;
+    }
+
     await Promise.all(
       timer.alerts
         .map((rule) => rule.notificationId)
@@ -242,6 +291,30 @@ export default function App() {
 
     if (!granted || !timer.targetAt) {
       return timer;
+    }
+
+    if (isDesktopRuntime()) {
+      const updatedAlerts = timer.alerts.map((rule) => {
+        const triggerAt = timer.targetAt! - rule.offsetMs;
+
+        if (rule.fired || triggerAt <= Date.now()) {
+          return rule;
+        }
+
+        const notificationId = desktopNotificationId(timer.id, rule.id);
+        sendDesktopNotification({
+          id: notificationId,
+          title: rule.offsetMs === 0 ? `${timer.label} finished` : `${timer.label}: ${rule.label}`,
+          body: rule.offsetMs === 0 ? 'Time is up.' : `${formatOffset(rule.offsetMs)} remaining.`,
+          schedule: Schedule.at(new Date(triggerAt), false, true),
+          sound: 'message-new-instant',
+          autoCancel: true,
+        });
+
+        return { ...rule, desktopNotificationId: notificationId };
+      });
+
+      return { ...timer, alerts: updatedAlerts };
     }
 
     const updatedAlerts = await Promise.all(
@@ -282,6 +355,8 @@ export default function App() {
 
         const alerts = timer.alerts.map((rule) =>
           rule.id === alertId ? { ...rule, fired: true, notificationId: undefined } : rule,
+        ).map((rule) =>
+          rule.id === alertId ? { ...rule, desktopNotificationId: undefined } : rule,
         );
         const allFired = alerts.every((rule) => rule.fired);
 
@@ -341,6 +416,22 @@ export default function App() {
   }, [requestNotificationAccess]);
 
   useEffect(() => {
+    if (!isDesktopRuntime()) {
+      return undefined;
+    }
+
+    let unlisten: (() => void) | undefined;
+    void getCurrentWindow().onCloseRequested((event) => {
+      event.preventDefault();
+      void getCurrentWindow().hide();
+    }).then((handler) => {
+      unlisten = handler;
+    });
+
+    return () => unlisten?.();
+  }, []);
+
+  useEffect(() => {
     const interval = setInterval(() => {
       setNow(Date.now());
     }, SECOND);
@@ -359,6 +450,25 @@ export default function App() {
 
     return () => subscription.remove();
   }, [showForegroundAlert]);
+
+  useEffect(() => {
+    if (!isDesktopRuntime()) {
+      return;
+    }
+
+    timersRef.current.forEach((timer) => {
+      if (timer.status !== 'running') {
+        return;
+      }
+
+      const remainingMs = getRemainingMs(timer, now);
+      timer.alerts.forEach((rule) => {
+        if (!rule.fired && remainingMs <= rule.offsetMs) {
+          showForegroundAlert(timer.id, rule.id);
+        }
+      });
+    });
+  }, [now, showForegroundAlert]);
 
   useEffect(() => {
     setTimers((current) => {
@@ -418,7 +528,12 @@ export default function App() {
       status: 'running',
       targetAt: Date.now() + remainingMs,
       pausedRemainingMs: remainingMs,
-      alerts: timer.alerts.map((rule) => ({ ...rule, fired: false, notificationId: undefined })),
+      alerts: timer.alerts.map((rule) => ({
+        ...rule,
+        fired: false,
+        notificationId: undefined,
+        desktopNotificationId: undefined,
+      })),
     };
     const scheduled = await scheduleTimerNotifications(runningTimer);
     updateTimers((current) => current.map((item) => (item.id === timer.id ? scheduled : item)));
@@ -434,7 +549,11 @@ export default function App() {
               status: 'paused',
               pausedRemainingMs: getRemainingMs(item),
               targetAt: undefined,
-              alerts: item.alerts.map((rule) => ({ ...rule, notificationId: undefined })),
+              alerts: item.alerts.map((rule) => ({
+                ...rule,
+                notificationId: undefined,
+                desktopNotificationId: undefined,
+              })),
             }
           : item,
       ),
@@ -451,7 +570,12 @@ export default function App() {
               status: 'idle',
               targetAt: undefined,
               pausedRemainingMs: item.durationMs,
-              alerts: item.alerts.map((rule) => ({ ...rule, fired: false, notificationId: undefined })),
+              alerts: item.alerts.map((rule) => ({
+                ...rule,
+                fired: false,
+                notificationId: undefined,
+                desktopNotificationId: undefined,
+              })),
             }
           : item,
       ),
