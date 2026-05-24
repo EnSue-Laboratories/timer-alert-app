@@ -1,0 +1,34 @@
+{
+  "name": "timer-alert-app",
+  "version": "1.0.0",
+  "main": "index.ts",
+  "dependencies": {
+    "@react-native-async-storage/async-storage": "2.2.0",
+    "@tauri-apps/api": "^2.11.0",
+    "@tauri-apps/plugin-notification": "^2.3.3",
+    "expo": "~56.0.4",
+    "expo-notifications": "~56.0.13",
+    "expo-status-bar": "~56.0.4",
+    "react": "19.2.3",
+    "react-dom": "19.2.3",
+    "react-native": "0.85.3",
+    "react-native-web": "^0.21.2"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.2",
+    "@types/react": "~19.2.2",
+    "typescript": "~6.0.3"
+  },
+  "scripts": {
+    "start": "expo start",
+    "android": "expo start --android",
+    "ios": "expo start --ios",
+    "web": "expo start --web",
+    "web:desktop": "BROWSER=none expo start --web",
+    "typecheck": "tsc --noEmit",
+    "export:web": "expo export --platform web",
+    "desktop": "tauri dev",
+    "desktop:build": "tauri build"
+  },
+  "private": true
+}
